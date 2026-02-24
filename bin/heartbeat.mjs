@@ -129,6 +129,7 @@ Run/Start options:
   --max-cycles <n>          Exit after n cycles
   --start-if-empty          Start a turn if thread currently has no turns
   --codex-bin <path>        Codex executable path (default: codex)
+  --yolo                    Launch codex app-server with --yolo
   --experimental-api        Set initialize.capabilities.experimentalApi=true
   --name <label>            Optional label for a started background job
   --state-dir <path>        State dir (default: ~/.heartbeat)
@@ -552,6 +553,7 @@ function parseRunOptions(argv, { allowInternal = false } = {}) {
     maxCycles: null,
     startIfEmpty: false,
     codexBin: "codex",
+    yolo: false,
     experimentalApi: false,
     name: null,
     stateDir: defaultStateDir(),
@@ -620,6 +622,9 @@ function parseRunOptions(argv, { allowInternal = false } = {}) {
         break;
       case "--codex-bin":
         raw.codexBin = value();
+        break;
+      case "--yolo":
+        raw.yolo = true;
         break;
       case "--experimental-api":
         raw.experimentalApi = true;
@@ -693,6 +698,7 @@ function normalizeRunConfig(raw) {
     maxCycles,
     startIfEmpty: raw.startIfEmpty,
     codexBin: raw.codexBin,
+    yolo: raw.yolo,
     experimentalApi: raw.experimentalApi,
     name: raw.name,
     stateDir: resolveStateDir(raw.stateDir),
@@ -894,12 +900,18 @@ function parseClearOptions(argv) {
 }
 
 class AppServerClient {
-  constructor({ codexBin, experimentalApi }) {
+  constructor({ codexBin, experimentalApi, yolo }) {
     this.nextId = 1;
     this.pending = new Map();
     this.closed = false;
 
-    this.proc = spawn(codexBin, ["app-server", "--listen", "stdio://"], {
+    const codexArgs = [];
+    if (Boolean(yolo)) {
+      codexArgs.push("--yolo");
+    }
+    codexArgs.push("app-server", "--listen", "stdio://");
+
+    this.proc = spawn(codexBin, codexArgs, {
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
     });
@@ -1096,6 +1108,7 @@ async function resumeThread(client, threadId) {
 async function preflightResolveAndResume(config) {
   const client = new AppServerClient({
     codexBin: config.codexBin,
+    yolo: config.yolo,
     experimentalApi: config.experimentalApi,
   });
   try {
@@ -1222,6 +1235,9 @@ function buildRunArgs(config, internal) {
     args.push("--start-if-empty");
   }
   args.push("--codex-bin", config.codexBin);
+  if (config.yolo) {
+    args.push("--yolo");
+  }
   if (config.experimentalApi) {
     args.push("--experimental-api");
   }
@@ -1263,6 +1279,7 @@ function makeJobRecord(config, { jobId, logFile }) {
       maxCycles: config.maxCycles,
       startIfEmpty: config.startIfEmpty,
       codexBin: config.codexBin,
+      yolo: config.yolo,
       experimentalApi: config.experimentalApi,
       name: config.name || null,
     },
@@ -1444,6 +1461,7 @@ async function executeRun(config) {
 
     client = new AppServerClient({
       codexBin: config.codexBin,
+      yolo: config.yolo,
       experimentalApi: config.experimentalApi,
     });
     await client.ready;

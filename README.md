@@ -91,6 +91,7 @@ Override with `--prompt` or `--prompt-file`.
 ## Notes
 
 - Multiple concurrent heartbeat jobs are supported.
+- Use `--yolo` with `run`/`start` to launch Codex as `codex --yolo app-server ...`.
 - By default, the first cycle waits one full `--interval`; `--once` still runs immediately.
 - Default local state path is `~/.heartbeat` (jobs + logs).
 - `heartbeat start` does a preflight `thread/resume` check before daemonizing. If a thread id is stale/non-resumable, it fails immediately with remediation guidance.
