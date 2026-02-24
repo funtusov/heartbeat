@@ -119,6 +119,7 @@ Run/Start options:
   --cwd <path>              CWD filter for auto-thread selection (default: current dir)
   --source-kind <kind>      Optional source kind filter (repeatable)
   --interval <dur>          Poll interval (e.g. 30s, 15m, 2h) (default: 15m)
+                            First cycle waits one interval before checking
   --for <dur>               Run for this duration (e.g. 8h)
   --until <time>            Stop at this time (ISO, HH:MM, or 'tomorrow 7am')
   --prompt <text>           Follow-up prompt text
@@ -1315,6 +1316,25 @@ async function initRunJobRecord(config) {
   });
 }
 
+async function updateRunJobWaiting(config, update) {
+  if (!config.jobId) {
+    return;
+  }
+  await patchJobRecord(config.stateDir, config.jobId, (record) => {
+    const runtime = { ...(record.runtime || {}) };
+    runtime.nextRunAt = update.nextRunAt ?? runtime.nextRunAt ?? null;
+    runtime.lastAction = update.lastAction ?? runtime.lastAction ?? null;
+    runtime.resolvedThreadId = update.resolvedThreadId || runtime.resolvedThreadId || null;
+    return {
+      ...record,
+      status: update.status || record.status || "running",
+      pid: process.pid,
+      threadId: update.resolvedThreadId || record.threadId || null,
+      runtime,
+    };
+  });
+}
+
 async function updateRunJobCycle(config, update) {
   if (!config.jobId) {
     return;
@@ -1370,6 +1390,32 @@ async function finalizeRunJob(config, status, extra = {}) {
   });
 }
 
+function computeNextSleep(config) {
+  const intervalMs = Math.round(config.intervalSec * 1000);
+  const nowMs = Date.now();
+  if (config.deadline) {
+    const remainingMs = config.deadline.getTime() - nowMs;
+    if (remainingMs <= 0) {
+      return {
+        shouldStop: true,
+        sleepMs: 0,
+        nextRunAtIso: null,
+      };
+    }
+    const sleepMs = Math.min(intervalMs, remainingMs);
+    return {
+      shouldStop: false,
+      sleepMs,
+      nextRunAtIso: new Date(nowMs + sleepMs).toISOString(),
+    };
+  }
+  return {
+    shouldStop: false,
+    sleepMs: intervalMs,
+    nextRunAtIso: new Date(nowMs + intervalMs).toISOString(),
+  };
+}
+
 async function executeRun(config) {
   if (config.promptFile) {
     try {
@@ -1421,7 +1467,25 @@ async function executeRun(config) {
     }
 
     let cycle = 0;
-    for (;;) {
+    let allowCycles = true;
+    if (!config.once) {
+      const initialSleep = computeNextSleep(config);
+      if (initialSleep.shouldStop) {
+        allowCycles = false;
+      } else {
+        const waitText = formatSeconds(initialSleep.sleepMs / 1000);
+        log(`initial wait ${waitText} before first cycle`);
+        await updateRunJobWaiting(config, {
+          status: "running",
+          resolvedThreadId: threadId,
+          nextRunAt: initialSleep.nextRunAtIso,
+          lastAction: `waiting ${waitText} before first cycle`,
+        });
+        await sleepInterruptible(initialSleep.sleepMs, () => stopRequested);
+      }
+    }
+
+    for (; allowCycles; ) {
       if (stopRequested) {
         break;
       }
@@ -1433,22 +1497,17 @@ async function executeRun(config) {
       let shouldBreak = false;
       let nextRunAtIso = null;
       let sleepMs = 0;
+      const sleepPlan = computeNextSleep(config);
 
       if (config.once) {
         shouldBreak = true;
       } else if (config.maxCycles !== null && cycle >= config.maxCycles) {
         shouldBreak = true;
-      } else if (config.deadline) {
-        const remainingMs = config.deadline.getTime() - Date.now();
-        if (remainingMs <= 0) {
-          shouldBreak = true;
-        } else {
-          sleepMs = Math.min(config.intervalSec * 1000, remainingMs);
-          nextRunAtIso = new Date(Date.now() + sleepMs).toISOString();
-        }
+      } else if (sleepPlan.shouldStop) {
+        shouldBreak = true;
       } else {
-        sleepMs = config.intervalSec * 1000;
-        nextRunAtIso = new Date(Date.now() + sleepMs).toISOString();
+        sleepMs = sleepPlan.sleepMs;
+        nextRunAtIso = sleepPlan.nextRunAtIso;
       }
 
       await updateRunJobCycle(config, {
