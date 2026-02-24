@@ -1,6 +1,6 @@
 # @funtusov/heartbeat
 
-Codex thread heartbeat CLI.
+Codex thread heartbeat CLI with local job tracking.
 
 It periodically checks a Codex thread via `codex app-server`, and when the latest turn is terminal (`completed`, `interrupted`, `failed`) it starts a follow-up turn with your continuation prompt.
 
@@ -22,19 +22,49 @@ npx @funtusov/heartbeat --help
 - `codex` CLI installed and authenticated (`codex login`)
 - Node.js >= 18
 
-## Typical usage
+## Commands
+
+### Start a background heartbeat
 
 ```bash
-# Every 15m for 8h on latest thread in current cwd
-heartbeat --interval 15m --for 8h
+heartbeat start --thread-id 019c... --interval 15m --for 8h
+```
 
-# Explicit thread, run until tomorrow 7am
-heartbeat --thread-id 019c909b-94c5-75b3-9797-ab5b5983d4c6 \
-  --interval 15m \
-  --until "tomorrow 7am"
+### Show active/history jobs (table)
 
-# One dry-run cycle (no turn start)
-heartbeat --once --dry-run
+```bash
+heartbeat status
+```
+
+Columns include:
+- `STARTED`
+- `EVERY`
+- `THREAD`
+- `RUNS` (times ran)
+- `LAST RUN`
+- `NEXT RUN`
+- `LAST ACTION`
+
+### Stop one/all jobs
+
+```bash
+heartbeat stop <job-id>
+heartbeat stop --all
+```
+
+### View job logs
+
+```bash
+heartbeat logs <job-id>
+heartbeat logs --tail 50
+```
+
+### Foreground mode (legacy behavior)
+
+```bash
+heartbeat --interval 15m --until "tomorrow 7am"
+# same as:
+heartbeat run --interval 15m --until "tomorrow 7am"
 ```
 
 ## Follow-up prompt
@@ -45,23 +75,7 @@ Default prompt:
 
 Override with `--prompt` or `--prompt-file`.
 
-## Options
+## Notes
 
-```text
---thread-id <id>
---cwd <path>
---source-kind <kind>      (repeatable)
---interval <dur>          e.g. 30s, 15m, 2h, 1d
---for <dur>
---until <time>            ISO, HH:MM, or "tomorrow 7am"
---prompt <text>
---prompt-file <path>
---dry-run
---once
---max-cycles <n>
---start-if-empty
---codex-bin <path>
---experimental-api
--h, --help
--v, --version
-```
+- Multiple concurrent heartbeat jobs are supported.
+- Default local state path is `~/.heartbeat` (jobs + logs).
