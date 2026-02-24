@@ -52,6 +52,51 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+function isResumeNotFoundError(message) {
+  const text = String(message || "").toLowerCase();
+  return (
+    text.includes("thread/resume failed") &&
+    (text.includes("no rollout found for thread id") ||
+      text.includes("thread not loaded"))
+  );
+}
+
+function isTurnStartUnsupportedError(message) {
+  const text = String(message || "").toLowerCase();
+  if (!text.includes("turn/start failed")) {
+    return false;
+  }
+  return (
+    text.includes("read-only") ||
+    text.includes("readonly") ||
+    text.includes("cannot start") ||
+    text.includes("not loaded") ||
+    text.includes("no rollout found")
+  );
+}
+
+function normalizeRunError(error, config) {
+  const original = error instanceof Error ? error : new Error(String(error));
+  const message = original.message || String(original);
+
+  if (isResumeNotFoundError(message)) {
+    const hint = config.threadId
+      ? `The provided --thread-id (${config.threadId}) is not resumable via codex app-server.`
+      : "No resumable thread was found for the current selection.";
+    return new Error(
+      `${hint} Use 'heartbeat run --once --dry-run' without --thread-id to auto-pick a valid thread, or create/resume a fresh app-server thread and retry.`,
+    );
+  }
+
+  if (isTurnStartUnsupportedError(message)) {
+    return new Error(
+      "turn/start is not available for this thread in the current app-server session. Create or resume an app-server-managed thread, then run heartbeat against that thread id.",
+    );
+  }
+
+  return original;
+}
+
 function printHelp() {
   console.log(`heartbeat v${VERSION}
 
@@ -987,6 +1032,27 @@ async function readThread(client, threadId) {
   return result.thread;
 }
 
+async function resumeThread(client, threadId) {
+  await client.request("thread/resume", { threadId });
+}
+
+async function preflightResolveAndResume(config) {
+  const client = new AppServerClient({
+    codexBin: config.codexBin,
+    experimentalApi: config.experimentalApi,
+  });
+  try {
+    await client.ready;
+    const threadId = await resolveThreadId(client, config);
+    await resumeThread(client, threadId);
+    return threadId;
+  } catch (err) {
+    throw normalizeRunError(err, config);
+  } finally {
+    await client.close();
+  }
+}
+
 async function startFollowUpTurn(client, threadId, prompt) {
   const result = await client.request("turn/start", {
     threadId,
@@ -1281,6 +1347,7 @@ async function executeRun(config) {
     await client.ready;
 
     const threadId = await resolveThreadId(client, config);
+    await resumeThread(client, threadId);
     log(
       `heartbeat started thread=${threadId} interval=${Math.round(config.intervalSec)}s dry_run=${config.dryRun} deadline=${config.deadline ? config.deadline.toISOString() : "none"}`,
     );
@@ -1353,11 +1420,12 @@ async function executeRun(config) {
     await finalizeRunJob(config, endStatus, { lastAction: endAction });
     log("heartbeat finished");
   } catch (err) {
+    const normalizedError = normalizeRunError(err, config);
     await finalizeRunJob(config, "error", {
-      lastError: err.message,
+      lastError: normalizedError.message,
       lastAction: "failed",
     });
-    throw err;
+    throw normalizedError;
   } finally {
     process.removeListener("SIGTERM", onSignal);
     process.removeListener("SIGINT", onSignal);
@@ -1381,12 +1449,18 @@ async function executeStart(config) {
     }
   }
 
+  const resolvedThreadId = await preflightResolveAndResume(config);
+  const startConfig = {
+    ...config,
+    threadId: resolvedThreadId,
+  };
+
   const jobId = generateJobId();
   const logFile = path.join(logsDir(config.stateDir), `${jobId}.log`);
-  const initialRecord = makeJobRecord(config, { jobId, logFile });
+  const initialRecord = makeJobRecord(startConfig, { jobId, logFile });
   await writeJobRecord(config.stateDir, jobId, initialRecord);
 
-  const runArgs = buildRunArgs(config, { jobId, logFile });
+  const runArgs = buildRunArgs(startConfig, { jobId, logFile });
   const logFd = fs.openSync(logFile, "a");
   let child;
 
@@ -1414,10 +1488,12 @@ async function executeStart(config) {
     status: "running",
     pid: child.pid,
     startedAt: record.startedAt || nowIso(),
+    threadId: resolvedThreadId,
   }));
 
   console.log(`Started heartbeat job ${jobId}`);
   console.log(`  pid:      ${child.pid}`);
+  console.log(`  thread:   ${resolvedThreadId}`);
   console.log(`  interval: ${Math.round(config.intervalSec)}s`);
   console.log(`  state:    ${config.stateDir}`);
   console.log(`  logs:     ${logFile}`);

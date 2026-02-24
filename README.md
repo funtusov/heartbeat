@@ -79,3 +79,5 @@ Override with `--prompt` or `--prompt-file`.
 
 - Multiple concurrent heartbeat jobs are supported.
 - Default local state path is `~/.heartbeat` (jobs + logs).
+- `heartbeat start` does a preflight `thread/resume` check before daemonizing. If a thread id is stale/non-resumable, it fails immediately with remediation guidance.
+- If `--thread-id` fails to resume, try `heartbeat run --once --dry-run` without `--thread-id` to auto-pick a resumable thread in your current `--cwd`.
