@@ -1135,6 +1135,60 @@ async function startFollowUpTurn(client, threadId, prompt) {
   return String(turnId);
 }
 
+function toEpochMillis(raw) {
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw > 1e12 ? raw : raw * 1000;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    const asNumber = Number(trimmed);
+    if (Number.isFinite(asNumber)) {
+      return asNumber > 1e12 ? asNumber : asNumber * 1000;
+    }
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function compareTurnRecency(left, right) {
+  const leftTs = toEpochMillis(left?.updatedAt) ?? toEpochMillis(left?.createdAt) ?? -1;
+  const rightTs = toEpochMillis(right?.updatedAt) ?? toEpochMillis(right?.createdAt) ?? -1;
+  if (leftTs !== rightTs) {
+    return leftTs - rightTs;
+  }
+  const leftId = String(left?.id ?? "");
+  const rightId = String(right?.id ?? "");
+  return leftId.localeCompare(rightId);
+}
+
+function selectRelevantTurn(turns) {
+  if (!Array.isArray(turns) || turns.length === 0) {
+    return null;
+  }
+
+  let mostRecent = null;
+  let mostRecentActive = null;
+  for (const turn of turns) {
+    const status = String(turn?.status ?? "unknown");
+    if (!mostRecent || compareTurnRecency(turn, mostRecent) > 0) {
+      mostRecent = turn;
+    }
+    if (!TERMINAL_TURN_STATUSES.has(status)) {
+      if (!mostRecentActive || compareTurnRecency(turn, mostRecentActive) > 0) {
+        mostRecentActive = turn;
+      }
+    }
+  }
+
+  return mostRecentActive || mostRecent;
+}
+
 async function runCycle({ client, config, threadId, cycle }) {
   const thread = await readThread(client, threadId);
   const turns = Array.isArray(thread.turns) ? thread.turns : [];
@@ -1168,12 +1222,12 @@ async function runCycle({ client, config, threadId, cycle }) {
     };
   }
 
-  const lastTurn = turns[turns.length - 1] ?? {};
+  const lastTurn = selectRelevantTurn(turns) ?? {};
   const lastTurnId = String(lastTurn.id ?? "?");
   const status = String(lastTurn.status ?? "unknown");
   const updatedAt = thread.updatedAt ?? "?";
   log(
-    `cycle=${cycle} thread=${threadId} last_turn=${lastTurnId} status=${status} updatedAt=${updatedAt}`,
+    `cycle=${cycle} thread=${threadId} turns=${turns.length} selected_turn=${lastTurnId} status=${status} updatedAt=${updatedAt}`,
   );
 
   if (!TERMINAL_TURN_STATUSES.has(status)) {
