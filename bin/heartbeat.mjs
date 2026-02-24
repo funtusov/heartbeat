@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   rename,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -21,7 +22,7 @@ const PACKAGE_JSON = JSON.parse(
 );
 const VERSION = PACKAGE_JSON.version;
 
-const COMMANDS = new Set(["run", "start", "status", "stop", "logs"]);
+const COMMANDS = new Set(["run", "start", "status", "stop", "logs", "clear"]);
 const TERMINAL_TURN_STATUSES = new Set(["completed", "interrupted", "failed"]);
 const SOURCE_KINDS = new Set([
   "cli",
@@ -108,6 +109,7 @@ Usage:
   heartbeat status [options]
   heartbeat stop <job-id|pid> [options]
   heartbeat logs [job-id|pid] [options]
+  heartbeat clear [options]
 
 Backward-compatible alias:
   heartbeat [run options]    (same as 'heartbeat run ...')
@@ -143,6 +145,11 @@ Logs options:
   --tail <n>               Show last n lines (default: 200)
   --state-dir <path>       State dir (default: ~/.heartbeat)
 
+Clear options:
+  --older-than <dur>       Only clear non-running jobs older than this duration (e.g. 1d)
+  --dry-run                Show what would be cleared without deleting files
+  --state-dir <path>       State dir (default: ~/.heartbeat)
+
 Global:
   -h, --help               Show help
   -v, --version            Show version
@@ -154,6 +161,8 @@ Source kinds:
 Examples:
   heartbeat start --thread-id 019c... --interval 15m --for 8h
   heartbeat status
+  heartbeat clear
+  heartbeat clear --older-than 7d
   heartbeat stop --all
   heartbeat logs
   heartbeat --interval 15m --until "tomorrow 7am"
@@ -828,6 +837,53 @@ function parseLogsOptions(argv) {
         throw new Error(`Unknown option '${token}'`);
     }
     index = state.index;
+  }
+
+  return {
+    ...raw,
+    stateDir: resolveStateDir(raw.stateDir),
+  };
+}
+
+function parseClearOptions(argv) {
+  const raw = {
+    olderThan: null,
+    olderThanSec: null,
+    dryRun: false,
+    stateDir: defaultStateDir(),
+    help: false,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const state = { index };
+    const token = argv[index];
+
+    if (token === "-h" || token === "--help") {
+      raw.help = true;
+      continue;
+    }
+
+    const [key, inline] = splitOption(token);
+    const value = () => requireOptionValue(argv, state, key, inline);
+
+    switch (key) {
+      case "--older-than":
+        raw.olderThan = value();
+        break;
+      case "--dry-run":
+        raw.dryRun = true;
+        break;
+      case "--state-dir":
+        raw.stateDir = value();
+        break;
+      default:
+        throw new Error(`Unknown option '${token}'`);
+    }
+    index = state.index;
+  }
+
+  if (raw.olderThan !== null) {
+    raw.olderThanSec = parseDuration(raw.olderThan);
   }
 
   return {
@@ -1662,6 +1718,91 @@ async function executeLogs(config) {
   }
 }
 
+function resolveClearReferenceIso(record) {
+  return record.stoppedAt || record.updatedAt || record.createdAt || null;
+}
+
+function isClearCandidate(record, olderThanSec) {
+  const state = deriveJobStatus(record);
+  if (state === "running") {
+    return false;
+  }
+
+  if (olderThanSec === null) {
+    return true;
+  }
+
+  const refIso = resolveClearReferenceIso(record);
+  if (!refIso) {
+    return false;
+  }
+  const refMs = Date.parse(refIso);
+  if (Number.isNaN(refMs)) {
+    return false;
+  }
+  const ageSec = (Date.now() - refMs) / 1000;
+  return ageSec >= olderThanSec;
+}
+
+async function safeUnlink(filePath) {
+  try {
+    await unlink(filePath);
+    return true;
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      return false;
+    }
+    throw err;
+  }
+}
+
+async function executeClear(config) {
+  const jobs = await listJobRecords(config.stateDir);
+  const candidates = jobs.filter((job) => isClearCandidate(job, config.olderThanSec));
+
+  if (candidates.length === 0) {
+    if (config.olderThanSec !== null) {
+      console.log(
+        `No non-running heartbeat jobs older than ${config.olderThan} found in ${config.stateDir}`,
+      );
+    } else {
+      console.log(`No non-running heartbeat jobs found in ${config.stateDir}`);
+    }
+    return;
+  }
+
+  if (config.dryRun) {
+    console.log("Would clear the following heartbeat jobs:");
+    for (const job of candidates) {
+      const state = deriveJobStatus(job);
+      const refIso = resolveClearReferenceIso(job);
+      console.log(
+        `- ${job.id} (state=${state}, ref=${refIso || "n/a"}, pid=${job.pid || "-"})`,
+      );
+    }
+    return;
+  }
+
+  let jobFilesDeleted = 0;
+  let logFilesDeleted = 0;
+  for (const job of candidates) {
+    const id = job.id;
+    const jobPath = jobFilePath(config.stateDir, id);
+    const logPath = job.logFile || path.join(logsDir(config.stateDir), `${id}.log`);
+
+    if (await safeUnlink(jobPath)) {
+      jobFilesDeleted += 1;
+    }
+    if (await safeUnlink(logPath)) {
+      logFilesDeleted += 1;
+    }
+  }
+
+  console.log(
+    `Cleared ${candidates.length} heartbeat job(s) (${jobFilesDeleted} job file(s), ${logFilesDeleted} log file(s)).`,
+  );
+}
+
 async function main() {
   const argv = process.argv.slice(2);
 
@@ -1730,6 +1871,16 @@ async function main() {
         return;
       }
       await executeLogs(config);
+      return;
+    }
+
+    if (command === "clear") {
+      const config = parseClearOptions(args);
+      if (config.help) {
+        printHelp();
+        return;
+      }
+      await executeClear(config);
       return;
     }
 

@@ -59,6 +59,19 @@ heartbeat logs <job-id>
 heartbeat logs --tail 50
 ```
 
+### Clear old non-running jobs
+
+```bash
+# Remove stopped/failed/exited/completed jobs and their logs
+heartbeat clear
+
+# Preview first
+heartbeat clear --dry-run
+
+# Only clear jobs older than 7 days
+heartbeat clear --older-than 7d
+```
+
 ### Foreground mode (legacy behavior)
 
 ```bash
@@ -81,3 +94,4 @@ Override with `--prompt` or `--prompt-file`.
 - Default local state path is `~/.heartbeat` (jobs + logs).
 - `heartbeat start` does a preflight `thread/resume` check before daemonizing. If a thread id is stale/non-resumable, it fails immediately with remediation guidance.
 - If `--thread-id` fails to resume, try `heartbeat run --once --dry-run` without `--thread-id` to auto-pick a resumable thread in your current `--cwd`.
+- `heartbeat clear` only deletes non-running jobs; it does not stop running jobs.
