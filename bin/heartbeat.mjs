@@ -1135,6 +1135,36 @@ async function startFollowUpTurn(client, threadId, prompt) {
   return String(turnId);
 }
 
+function hasTurn(thread, turnId) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  return turns.some((turn) => String(turn?.id ?? "") === turnId);
+}
+
+async function waitForTurnVisible(client, threadId, turnId, timeoutMs = 10000, pollMs = 250) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const thread = await readThread(client, threadId);
+    if (hasTurn(thread, turnId)) {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await sleep(pollMs);
+  }
+}
+
+async function startFollowUpTurnAndWait(client, threadId, prompt) {
+  const turnId = await startFollowUpTurn(client, threadId, prompt);
+  const visible = await waitForTurnVisible(client, threadId, turnId);
+  if (!visible) {
+    throw new Error(
+      `turn/start returned turn.id=${turnId}, but it did not appear in thread/read within timeout.`,
+    );
+  }
+  return turnId;
+}
+
 function toEpochMillis(raw) {
   if (typeof raw === "number" && Number.isFinite(raw)) {
     return raw > 1e12 ? raw : raw * 1000;
@@ -1212,7 +1242,7 @@ async function runCycle({ client, config, threadId, cycle }) {
         startedTurnId: null,
       };
     }
-    const startedTurnId = await startFollowUpTurn(client, threadId, config.prompt);
+    const startedTurnId = await startFollowUpTurnAndWait(client, threadId, config.prompt);
     log(`started turn=${startedTurnId} (thread was empty)`);
     return {
       kind: "started-initial",
@@ -1249,7 +1279,7 @@ async function runCycle({ client, config, threadId, cycle }) {
     };
   }
 
-  const startedTurnId = await startFollowUpTurn(client, threadId, config.prompt);
+  const startedTurnId = await startFollowUpTurnAndWait(client, threadId, config.prompt);
   log(`started follow-up turn=${startedTurnId} after status=${status}`);
   return {
     kind: "started-followup",
